@@ -16,15 +16,22 @@ type Server struct {
 }
 
 type DataValue struct {
-	Content     string `json:"content"`
-	ContentType string `json:"content_type"`
-	Data        []byte `json:"data,omitempty"`
+	Content          string `json:"content"`
+	ContentType      string `json:"content_type"`
+	Data             []byte `json:"data,omitempty"`
+	AccessSecretHash []byte `json:"access_secret_hash,omitempty"`
+}
+
+// postRequest is the JSON body for POST (access_secret is not stored verbatim).
+type postRequest struct {
+	Content      string `json:"content"`
+	ContentType  string `json:"content_type"`
+	AccessSecret string `json:"access_secret,omitempty"`
 }
 
 func main() {
-	// Initialize BadgerDB
 	opts := badger.DefaultOptions("./data")
-	opts.Logger = nil // Disable logging for cleaner output
+	opts.Logger = nil
 
 	db, err := badger.Open(opts)
 	if err != nil {
@@ -33,29 +40,23 @@ func main() {
 	defer db.Close()
 
 	server := &Server{db: db}
-
-	// Initialize with some sample data
 	server.initializeSampleData()
 
-	// Create router
 	r := mux.NewRouter()
-
-	// Handle all paths with wildcard
 	r.HandleFunc("/{path:.*}", server.handlePath)
 
-	// Start server
-	fmt.Println("Server starting on :8080")
+	fmt.Println("Server starting on :8083")
 	fmt.Println("API Usage:")
 	fmt.Println("  GET /{path} - Retrieve data")
-	fmt.Println("  POST /{path} - Store data with JSON body")
-	fmt.Println("  PUT /{path} - Store raw data with Content-Type header")
+	fmt.Println("  POST /{path} - Store JSON { content, content_type, access_secret? }")
+	fmt.Println("  PUT /{path} - Store raw body; optional access via header", accessSecretHeader)
 	fmt.Println("  DELETE /{path} - Delete data")
+	fmt.Println("  Protected paths require the same access_secret on GET/DELETE")
 
-	log.Fatal(http.ListenAndServe(":8080", r))
+	log.Fatal(http.ListenAndServe(":8083", r))
 }
 
 func (s *Server) initializeSampleData() {
-	// Store some sample data
 	samples := map[string]DataValue{
 		"alphabet/soup": {
 			Content:     "Delicious alphabet soup recipe",
@@ -72,8 +73,7 @@ func (s *Server) initializeSampleData() {
 	}
 
 	for key, value := range samples {
-		err := s.storeValue(key, value)
-		if err != nil {
+		if err := s.storeValue(key, value); err != nil {
 			log.Printf("Failed to store sample data for %s: %v", key, err)
 		}
 	}
@@ -113,67 +113,79 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, path string) 
 		return
 	}
 
-	// Set appropriate content type
+	if !s.requireAccess(w, r, value) {
+		return
+	}
+
 	w.Header().Set("Content-Type", value.ContentType)
 
-	// For binary data, write the raw data
 	if len(value.Data) > 0 {
 		w.Write(value.Data)
 		return
 	}
 
-	// For text content, write the content
 	w.Write([]byte(value.Content))
 }
 
 func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, path string) {
-	var dataValue DataValue
-
-	// Parse JSON from request body
-	if err := json.NewDecoder(r.Body).Decode(&dataValue); err != nil {
+	var req postRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	// Validate required fields
-	if dataValue.ContentType == "" {
+	if req.ContentType == "" {
 		http.Error(w, "content_type is required", http.StatusBadRequest)
 		return
 	}
 
-	// Store the value
+	dataValue := DataValue{
+		Content:     req.Content,
+		ContentType: req.ContentType,
+	}
+
+	if err := applyAccessSecret(&dataValue, req.AccessSecret, nil); err != nil {
+		http.Error(w, "Failed to process access_secret", http.StatusInternalServerError)
+		return
+	}
+
 	if err := s.storeValue(path, dataValue); err != nil {
 		http.Error(w, "Failed to store data", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	response := map[string]string{
-		"status":  "success",
-		"message": fmt.Sprintf("Data stored at path: %s", path),
+	response := map[string]interface{}{
+		"status":    "success",
+		"message":   fmt.Sprintf("Data stored at path: %s", path),
+		"protected": len(dataValue.AccessSecretHash) > 0,
 	}
 	json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, path string) {
-	// Read the raw body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
 		return
 	}
 
-	// Get content type from header
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
-	// Store the raw data
 	dataValue := DataValue{
 		Content:     "",
 		ContentType: contentType,
 		Data:        body,
+	}
+
+	previous, _ := s.getValue(path)
+	secret := accessSecretFromRequest(r)
+	if err := applyAccessSecret(&dataValue, secret, previous); err != nil {
+		http.Error(w, "Failed to process access_secret", http.StatusInternalServerError)
+		return
 	}
 
 	if err := s.storeValue(path, dataValue); err != nil {
@@ -182,17 +194,17 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, path string) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	response := map[string]string{
-		"status":  "success",
-		"message": fmt.Sprintf("Data stored at path: %s", path),
-		"size":    fmt.Sprintf("%d bytes", len(body)),
+	response := map[string]interface{}{
+		"status":    "success",
+		"message":   fmt.Sprintf("Data stored at path: %s", path),
+		"size":      fmt.Sprintf("%d bytes", len(body)),
+		"protected": len(dataValue.AccessSecretHash) > 0,
 	}
 	json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, path string) {
-	// Check if the key exists first
-	_, err := s.getValue(path)
+	value, err := s.getValue(path)
 	if err != nil {
 		if err == badger.ErrKeyNotFound {
 			http.Error(w, fmt.Sprintf("Path '%s' not found", path), http.StatusNotFound)
@@ -202,7 +214,10 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, path strin
 		return
 	}
 
-	// Delete the key
+	if !s.requireAccess(w, r, value) {
+		return
+	}
+
 	if err := s.deleteValue(path); err != nil {
 		http.Error(w, "Failed to delete data", http.StatusInternalServerError)
 		return

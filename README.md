@@ -23,13 +23,39 @@ Flowerpot provides a RESTful API for storing and retrieving files at arbitrary h
 | `PUT` | `/{path}` | Store raw data with Content-Type header |
 | `DELETE` | `/{path}` | Delete data at path |
 
+### Optional per-path access secret
+
+When storing, you can require a secret to read (or delete) that path later.
+
+| When storing | How to set secret |
+|--------------|-------------------|
+| **POST** | JSON field `access_secret` (optional) |
+| **PUT** | Header `X-Flowerpot-Access-Secret: your-secret` (optional). Omit on PUT to keep an existing secret when overwriting body. |
+
+| When reading/deleting | How to provide secret |
+|-----------------------|------------------------|
+| **GET**, **DELETE** | Same value via header `X-Flowerpot-Access-Secret` or query `?access_secret=` |
+
+Secrets are stored as bcrypt hashes only (`access_secret_hash` in the database). Wrong or missing secret → **401 Unauthorized**. Paths without a secret behave as before (public GET).
+
 ## Data Structure
 
 ```go
 type DataValue struct {
-    Content     string `json:"content"`      // Text content
-    ContentType string `json:"content_type"` // MIME type
-    Data        []byte `json:"data,omitempty"` // Binary data
+    Content          string `json:"content"`       // Text content
+    ContentType      string `json:"content_type"`  // MIME type
+    Data             []byte `json:"data,omitempty"` // Binary data (PUT)
+    AccessSecretHash []byte `json:"access_secret_hash,omitempty"` // Set by server; never send on POST body
+}
+```
+
+POST body:
+
+```json
+{
+  "content": "{ \"theme\": \"dark\" }",
+  "content_type": "application/json",
+  "access_secret": "my-gate-password"
 }
 ```
 
@@ -46,7 +72,7 @@ go build -o flowerpot main.go
 ./flowerpot
 ```
 
-Server starts on port 8080.
+Server starts on port 8083.
 
 ## Storage
 

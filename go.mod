@@ -5,6 +5,7 @@ go 1.21
 require (
 	github.com/dgraph-io/badger/v4 v4.2.0
 	github.com/gorilla/mux v1.8.1
+	golang.org/x/crypto v0.14.0
 )
 
 require (

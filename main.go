@@ -12,7 +12,8 @@ import (
 )
 
 type Server struct {
-	db *badger.DB
+	db     *badger.DB
+	tokens *TokenConfig
 }
 
 type DataValue struct {
@@ -30,6 +31,15 @@ type postRequest struct {
 }
 
 func main() {
+	tokens, created, err := loadOrCreateTokenConfig()
+	if err != nil {
+		log.Fatal("Failed to load token config:", err)
+	}
+	if created {
+		log.Printf("Created %s", tokens.path)
+		log.Printf("Usage password (save this): %s", tokens.UsagePassword)
+	}
+
 	opts := badger.DefaultOptions("./data")
 	opts.Logger = nil
 
@@ -39,17 +49,19 @@ func main() {
 	}
 	defer db.Close()
 
-	server := &Server{db: db}
+	server := &Server{db: db, tokens: tokens}
 	server.initializeSampleData()
 
 	r := mux.NewRouter()
+	r.HandleFunc(adminTokensPath, server.handleGenerateTokens).Methods(http.MethodPost)
 	r.HandleFunc("/{path:.*}", server.handlePath)
 
 	fmt.Println("Server starting on :8083")
 	fmt.Println("API Usage:")
+	fmt.Println("  POST", adminTokensPath, "- Generate usage tokens (header", usagePasswordHeader+")")
 	fmt.Println("  GET /{path} - Retrieve data")
-	fmt.Println("  POST /{path} - Store JSON { content, content_type, access_secret? }")
-	fmt.Println("  PUT /{path} - Store raw body; optional access via header", accessSecretHeader)
+	fmt.Println("  POST /{path} - Store JSON; requires header", usageTokenHeader)
+	fmt.Println("  PUT /{path} - Store raw body; requires header", usageTokenHeader)
 	fmt.Println("  DELETE /{path} - Delete data")
 	fmt.Println("  Protected paths require the same access_secret on GET/DELETE")
 
@@ -149,8 +161,9 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, path string)
 		return
 	}
 
-	if err := s.storeValue(path, dataValue); err != nil {
-		http.Error(w, "Failed to store data", http.StatusInternalServerError)
+	if !s.requireUsageToken(w, r, path, func() error {
+		return s.storeValue(path, dataValue)
+	}) {
 		return
 	}
 
@@ -188,8 +201,9 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, path string) 
 		return
 	}
 
-	if err := s.storeValue(path, dataValue); err != nil {
-		http.Error(w, "Failed to store data", http.StatusInternalServerError)
+	if !s.requireUsageToken(w, r, path, func() error {
+		return s.storeValue(path, dataValue)
+	}) {
 		return
 	}
 

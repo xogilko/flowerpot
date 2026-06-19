@@ -13,15 +13,45 @@ Flowerpot provides a RESTful API for storing and retrieving files at arbitrary h
 - **Binary support**: Stores and serves both text and binary files
 - **CRUD operations**: Full HTTP method support (GET, POST, PUT, DELETE)
 - **No file type restrictions**: Accepts any content type
+- **Single-use upload tokens**: POST and PUT require a one-time usage token; tokens are minted with the usage password
+
+## First launch
+
+On first run, Flowerpot creates `flowerpot.json` next to the executable with a randomly generated **usage password**. The password is printed to the log once — save it. That password is required to mint new upload tokens.
+
+Example `flowerpot.json`:
+
+```json
+{
+  "usage_password": "abc123...",
+  "tokens": {
+    "f8a2...": "",
+    "c91b...": "uploads/photo.png"
+  }
+}
+```
+
+- Token keys with an **empty string** value are unused and valid for one POST or PUT.
+- After a successful upload, the token's value is set to the path that was written.
 
 ## API Usage
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| `POST` | `/_flowerpot/tokens` | Mint usage tokens (requires usage password) |
 | `GET` | `/{path}` | Retrieve data stored at path |
-| `POST` | `/{path}` | Store JSON data with content and content_type |
-| `PUT` | `/{path}` | Store raw data with Content-Type header |
+| `POST` | `/{path}` | Store JSON data (requires usage token) |
+| `PUT` | `/{path}` | Store raw data (requires usage token) |
 | `DELETE` | `/{path}` | Delete data at path |
+
+### Usage tokens (upload gate)
+
+| Step | How |
+|------|-----|
+| **Mint tokens** | `POST /_flowerpot/tokens` with header `X-Flowerpot-Usage-Password: <usage password>`. Optional JSON body `{ "count": 5 }` (default 1, max 100). |
+| **Upload** | `POST` or `PUT` to `/{path}` with header `X-Flowerpot-Usage-Token: <token>`. Each token works once; it is then bound to that path in `flowerpot.json`. |
+
+Wrong or missing usage token → **401**. Already-used token → **403**.
 
 ### Optional per-path access secret
 

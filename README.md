@@ -69,15 +69,22 @@ Query: `?route=docs/readme` or `?ib=flowerpot:docs/readme`
 
 ### Access secrets (per version)
 
-Each version sets its own read secret explicitly — nothing is inherited from the previous version.
+Each version sets its own access policy explicitly — nothing is inherited from the previous version.
+
+| Mode | `access_secret` | `public_read` | GET | Overwrite / DELETE |
+|------|-----------------|---------------|-----|-------------------|
+| Fully public | omit | — | open | open (upload still needs usage token) |
+| Write-protected, public read | set | `true` | open | needs secret |
+| Fully protected | set | `false` or omit | needs secret | needs secret |
 
 | Purpose | How |
 |---------|-----|
-| **Authorize overwrite** (protected route) | `X-Flowerpot-Access-Secret` or `?access_secret=` (POST may also use JSON `access_secret` for the gate) |
-| **Assign read secret to new version** | **POST**: JSON `access_secret` · **PUT**: `X-Flowerpot-Frame-Access-Secret`, or `X-Flowerpot-Access-Secret` when not overwriting a protected route |
-| **Read / delete** | `X-Flowerpot-Access-Secret` or `?access_secret=` |
+| **Authorize overwrite** (write-protected latest) | `X-Flowerpot-Access-Secret` or `?access_secret=` (POST may also use JSON `access_secret` for the gate) |
+| **Assign secret to new version** | **POST**: JSON `access_secret` + optional `public_read` · **PUT**: `X-Flowerpot-Frame-Access-Secret` + optional `X-Flowerpot-Public-Read: true` |
+| **Read** | Secret only when the version is not `public_read` |
+| **Delete** | Secret when the version is write-protected |
 
-Overwriting a protected route without the current secret → **401**. Omitting a frame secret on upload → new version is **public**. Wrong or missing secret on GET/DELETE → **401**.
+Overwriting a write-protected route without the current secret → **401**. Omitting a frame secret on upload → new version is fully public.
 
 ### DELETE behavior
 
@@ -89,7 +96,8 @@ DELETE appends a **tombstone** frame. GET latest on a tombstoned route → **410
 {
   "content": "{ \"theme\": \"dark\" }",
   "content_type": "application/json",
-  "access_secret": "optional-read-password-for-this-version"
+  "access_secret": "write-password",
+  "public_read": true
 }
 ```
 
@@ -102,7 +110,8 @@ DELETE appends a **tombstone** frame. GET latest on a tombstoned route → **410
   "ib": "flowerpot:docs/readme",
   "addr": "flowerpot:docs/readme^abc123...",
   "gib": "abc123...",
-  "protected": false
+  "write_protected": true,
+  "public_read": true
 }
 ```
 

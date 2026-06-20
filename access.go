@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"strconv"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -9,7 +10,9 @@ import (
 const (
 	accessSecretHeader      = "X-Flowerpot-Access-Secret"
 	frameAccessSecretHeader = "X-Flowerpot-Frame-Access-Secret"
+	publicReadHeader        = "X-Flowerpot-Public-Read"
 	accessSecretQueryParam  = "access_secret"
+	publicReadQueryParam    = "public_read"
 )
 
 func accessSecretFromRequest(r *http.Request) string {
@@ -36,6 +39,18 @@ func putFrameSecret(r *http.Request, protectedOverwrite bool) string {
 	return ""
 }
 
+func publicReadFromRequest(r *http.Request) bool {
+	if v := r.Header.Get(publicReadHeader); v != "" {
+		b, err := strconv.ParseBool(v)
+		return err == nil && b
+	}
+	if v := r.URL.Query().Get(publicReadQueryParam); v != "" {
+		b, err := strconv.ParseBool(v)
+		return err == nil && b
+	}
+	return false
+}
+
 func hashAccessSecret(secret string) ([]byte, error) {
 	return bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
 }
@@ -50,25 +65,48 @@ func accessSecretMatches(hash []byte, secret string) bool {
 	return bcrypt.CompareHashAndPassword(hash, []byte(secret)) == nil
 }
 
-func (s *Server) requireAccessWithSecret(w http.ResponseWriter, secret string, value *DataValue) bool {
-	if len(value.AccessSecretHash) == 0 {
+func (v *DataValue) writeProtected() bool {
+	return len(v.AccessSecretHash) > 0
+}
+
+func (v *DataValue) readProtected() bool {
+	return v.writeProtected() && !v.PublicRead
+}
+
+func (s *Server) requireReadAccess(w http.ResponseWriter, secret string, value *DataValue) bool {
+	if value == nil || !value.readProtected() {
 		return true
 	}
 	if !accessSecretMatches(value.AccessSecretHash, secret) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"access_secret required (header X-Flowerpot-Access-Secret or query access_secret)"}`))
+		_, _ = w.Write([]byte(`{"error":"access_secret required to read (header X-Flowerpot-Access-Secret or query access_secret)"}`))
 		return false
 	}
 	return true
 }
 
-func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, value *DataValue) bool {
-	return s.requireAccessWithSecret(w, accessSecretFromRequest(r), value)
+func (s *Server) requireWriteAccess(w http.ResponseWriter, secret string, value *DataValue) bool {
+	if value == nil || !value.writeProtected() {
+		return true
+	}
+	if !accessSecretMatches(value.AccessSecretHash, secret) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"access_secret required to modify (header X-Flowerpot-Access-Secret or query access_secret)"}`))
+		return false
+	}
+	return true
 }
 
-func applyAccessSecret(value *DataValue, secret string) error {
+func (s *Server) requireReadAccessFromRequest(w http.ResponseWriter, r *http.Request, value *DataValue) bool {
+	return s.requireReadAccess(w, accessSecretFromRequest(r), value)
+}
+
+func applyFrameAccess(value *DataValue, secret string, publicRead bool) error {
 	if secret == "" {
+		value.AccessSecretHash = nil
+		value.PublicRead = false
 		return nil
 	}
 	hash, err := hashAccessSecret(secret)
@@ -76,5 +114,6 @@ func applyAccessSecret(value *DataValue, secret string) error {
 		return err
 	}
 	value.AccessSecretHash = hash
+	value.PublicRead = publicRead
 	return nil
 }

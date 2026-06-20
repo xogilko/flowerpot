@@ -36,6 +36,7 @@ type FrameData struct {
 	Content          string `json:"content,omitempty"`
 	DataRef          string `json:"data_ref,omitempty"`
 	AccessSecretHash []byte `json:"access_secret_hash,omitempty"`
+	PublicRead       bool   `json:"public_read,omitempty"`
 	Tombstone        bool   `json:"tombstone,omitempty"`
 }
 
@@ -54,6 +55,7 @@ type VersionEntry struct {
 	Tombstone   bool      `json:"tombstone"`
 	ContentType string    `json:"content_type,omitempty"`
 	Protected   bool      `json:"protected"`
+	PublicRead  bool      `json:"public_read,omitempty"`
 	StoredAt    time.Time `json:"stored_at"`
 }
 
@@ -75,6 +77,7 @@ type ResolvedFrame struct {
 	Content          string
 	Data             []byte
 	AccessSecretHash []byte
+	PublicRead       bool
 	Tombstone        bool
 }
 
@@ -206,6 +209,7 @@ func (s *IbGibStore) resolveFrame(addr string) (*ResolvedFrame, error) {
 		ContentType:      frame.Data.ContentType,
 		Content:          frame.Data.Content,
 		AccessSecretHash: frame.Data.AccessSecretHash,
+		PublicRead:       frame.Data.PublicRead,
 		Tombstone:        frame.Data.Tombstone,
 	}
 
@@ -332,6 +336,7 @@ func (s *IbGibStore) writeVersion(route string, data FrameData, bin []byte) (*Wr
 			Tombstone:   data.Tombstone,
 			ContentType: data.ContentType,
 			Protected:   len(data.AccessSecretHash) > 0,
+			PublicRead:  data.PublicRead,
 			StoredAt:    time.Now().UTC(),
 		}
 		if err := s.prependVersionEntryTxn(txn, ib, entry); err != nil {
@@ -388,6 +393,7 @@ func (s *IbGibStore) WritePost(route string, value DataValue) (*WriteResult, err
 		ContentType:      value.ContentType,
 		Content:          value.Content,
 		AccessSecretHash: value.AccessSecretHash,
+		PublicRead:       value.PublicRead,
 	}
 	return s.writeVersion(route, data, nil)
 }
@@ -396,6 +402,7 @@ func (s *IbGibStore) WritePut(route string, value DataValue) (*WriteResult, erro
 	data := FrameData{
 		ContentType:      value.ContentType,
 		AccessSecretHash: value.AccessSecretHash,
+		PublicRead:       value.PublicRead,
 	}
 	return s.writeVersion(route, data, value.Data)
 }
@@ -437,7 +444,7 @@ func (s *IbGibStore) ListVersions(route, ib, accessSecret, usagePassword string,
 
 	visible := make([]VersionEntry, 0, len(entries))
 	for _, entry := range entries {
-		if admin || !entry.Protected {
+		if admin || !entry.Protected || entry.PublicRead {
 			visible = append(visible, entry)
 			continue
 		}

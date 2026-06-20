@@ -23,12 +23,14 @@ type DataValue struct {
 	ContentType      string `json:"content_type"`
 	Data             []byte `json:"data,omitempty"`
 	AccessSecretHash []byte `json:"access_secret_hash,omitempty"`
+	PublicRead       bool   `json:"public_read,omitempty"`
 }
 
 type postRequest struct {
 	Content      string `json:"content"`
 	ContentType  string `json:"content_type"`
 	AccessSecret string `json:"access_secret,omitempty"`
+	PublicRead   bool   `json:"public_read,omitempty"`
 }
 
 func main() {
@@ -137,6 +139,7 @@ func frameToDataValue(frame *ResolvedFrame) *DataValue {
 		ContentType:      frame.ContentType,
 		Data:             frame.Data,
 		AccessSecretHash: frame.AccessSecretHash,
+		PublicRead:       frame.PublicRead,
 	}
 }
 
@@ -149,7 +152,7 @@ func (s *Server) requireOverwriteAccess(w http.ResponseWriter, gateSecret string
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return nil, false
 	}
-	if !s.requireAccessWithSecret(w, gateSecret, frameToDataValue(frame)) {
+	if !s.requireWriteAccess(w, gateSecret, frameToDataValue(frame)) {
 		return nil, false
 	}
 	return frame, true
@@ -161,7 +164,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, path string) 
 		return
 	}
 
-	if !s.requireAccess(w, r, frameToDataValue(frame)) {
+	if !s.requireReadAccessFromRequest(w, r, frameToDataValue(frame)) {
 		return
 	}
 
@@ -198,7 +201,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, path string)
 		ContentType: req.ContentType,
 	}
 
-	if err := applyAccessSecret(&dataValue, req.AccessSecret); err != nil {
+	if err := applyFrameAccess(&dataValue, req.AccessSecret, req.PublicRead); err != nil {
 		http.Error(w, "Failed to process access_secret", http.StatusInternalServerError)
 		return
 	}
@@ -219,7 +222,8 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, path string)
 		"ib":        result.Ib,
 		"addr":      result.Addr,
 		"gib":       result.Gib,
-		"protected": len(dataValue.AccessSecretHash) > 0,
+		"write_protected": dataValue.writeProtected(),
+		"public_read":     dataValue.PublicRead || !dataValue.writeProtected(),
 	})
 }
 
@@ -248,7 +252,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, path string) 
 		Data:        body,
 	}
 
-	if err := applyAccessSecret(&dataValue, putFrameSecret(r, protectedOverwrite)); err != nil {
+	if err := applyFrameAccess(&dataValue, putFrameSecret(r, protectedOverwrite), publicReadFromRequest(r)); err != nil {
 		http.Error(w, "Failed to process access_secret", http.StatusInternalServerError)
 		return
 	}
@@ -270,7 +274,8 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, path string) 
 		"addr":      result.Addr,
 		"gib":       result.Gib,
 		"size":      fmt.Sprintf("%d bytes", len(body)),
-		"protected": len(dataValue.AccessSecretHash) > 0,
+		"write_protected": dataValue.writeProtected(),
+		"public_read":     dataValue.PublicRead || !dataValue.writeProtected(),
 	})
 }
 
@@ -285,7 +290,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, path strin
 		return
 	}
 
-	if !s.requireAccess(w, r, frameToDataValue(frame)) {
+	if !s.requireWriteAccess(w, accessSecretFromRequest(r), frameToDataValue(frame)) {
 		return
 	}
 

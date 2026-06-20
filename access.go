@@ -43,17 +43,14 @@ func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, value *Da
 	return true
 }
 
-func applyAccessSecret(value *DataValue, secret string, previous *DataValue) error {
-	if secret != "" {
-		hash, err := hashAccessSecret(secret)
-		if err != nil {
-			return err
-		}
-		value.AccessSecretHash = hash
+func applyAccessSecret(value *DataValue, secret string) error {
+	if secret == "" {
 		return nil
 	}
-	if previous != nil {
-		value.AccessSecretHash = previous.AccessSecretHash
+	hash, err := hashAccessSecret(secret)
+	if err != nil {
+		return err
 	}
+	value.AccessSecretHash = hash
 	return nil
 }

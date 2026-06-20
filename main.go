@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,7 @@ import (
 
 type Server struct {
 	db     *badger.DB
+	store  *IbGibStore
 	tokens *TokenConfig
 }
 
@@ -23,7 +25,6 @@ type DataValue struct {
 	AccessSecretHash []byte `json:"access_secret_hash,omitempty"`
 }
 
-// postRequest is the JSON body for POST (access_secret is not stored verbatim).
 type postRequest struct {
 	Content      string `json:"content"`
 	ContentType  string `json:"content_type"`
@@ -49,46 +50,28 @@ func main() {
 	}
 	defer db.Close()
 
-	server := &Server{db: db, tokens: tokens}
-	server.initializeSampleData()
+	server := &Server{
+		db:     db,
+		store:  NewIbGibStore(db),
+		tokens: tokens,
+	}
 
 	r := mux.NewRouter()
 	r.HandleFunc(adminTokensPath, server.handleGenerateTokens).Methods(http.MethodPost)
+	r.HandleFunc(versionsPath, server.handleListVersions).Methods(http.MethodGet)
 	r.HandleFunc("/{path:.*}", server.handlePath)
 
 	fmt.Println("Server starting on :8083")
 	fmt.Println("API Usage:")
 	fmt.Println("  POST", adminTokensPath, "- Generate usage tokens (header", usagePasswordHeader+")")
-	fmt.Println("  GET /{path} - Retrieve data")
+	fmt.Println("  GET", versionsPath, "- List version metadata (?route= or ?ib=)")
+	fmt.Println("  GET /{path} - Retrieve latest (?addr=ib^gib for specific version)")
 	fmt.Println("  POST /{path} - Store JSON; requires header", usageTokenHeader)
 	fmt.Println("  PUT /{path} - Store raw body; requires header", usageTokenHeader)
-	fmt.Println("  DELETE /{path} - Delete data")
-	fmt.Println("  Protected paths require the same access_secret on GET/DELETE")
+	fmt.Println("  DELETE /{path} - Tombstone latest version")
+	fmt.Println("  Responses include header", ibGibHeader)
 
 	log.Fatal(http.ListenAndServe(":8083", r))
-}
-
-func (s *Server) initializeSampleData() {
-	samples := map[string]DataValue{
-		"alphabet/soup": {
-			Content:     "Delicious alphabet soup recipe",
-			ContentType: "text/plain",
-		},
-		"config/settings.json": {
-			Content:     `{"theme": "dark", "language": "en"}`,
-			ContentType: "application/json",
-		},
-		"docs/readme": {
-			Content:     "# Welcome to the API\n\nThis is a sample readme file.",
-			ContentType: "text/markdown",
-		},
-	}
-
-	for key, value := range samples {
-		if err := s.storeValue(key, value); err != nil {
-			log.Printf("Failed to store sample data for %s: %v", key, err)
-		}
-	}
 }
 
 func (s *Server) handlePath(w http.ResponseWriter, r *http.Request) {
@@ -101,42 +84,77 @@ func (s *Server) handlePath(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.Method {
-	case "GET":
+	case http.MethodGet:
 		s.handleGet(w, r, path)
-	case "POST":
+	case http.MethodPost:
 		s.handlePost(w, r, path)
-	case "PUT":
+	case http.MethodPut:
 		s.handlePut(w, r, path)
-	case "DELETE":
+	case http.MethodDelete:
 		s.handleDelete(w, r, path)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, path string) {
-	value, err := s.getValue(path)
-	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			http.Error(w, fmt.Sprintf("Path '%s' not found", path), http.StatusNotFound)
-			return
+func (s *Server) resolvedFrame(w http.ResponseWriter, r *http.Request, path string) (*ResolvedFrame, bool) {
+	if addr := r.URL.Query().Get("addr"); addr != "" {
+		frame, err := s.store.ReadAddr(addr)
+		if err != nil {
+			s.writeFrameError(w, path, err)
+			return nil, false
 		}
+		return frame, true
+	}
+
+	frame, err := s.store.ReadLatest(path)
+	if err != nil {
+		s.writeFrameError(w, path, err)
+		return nil, false
+	}
+	return frame, true
+}
+
+func (s *Server) writeFrameError(w http.ResponseWriter, path string, err error) {
+	switch {
+	case errors.Is(err, errRouteNotFound), errors.Is(err, errFrameNotFound):
+		http.Error(w, fmt.Sprintf("Path '%s' not found", path), http.StatusNotFound)
+	case errors.Is(err, errRouteGone):
+		http.Error(w, fmt.Sprintf("Path '%s' gone", path), http.StatusGone)
+	case errors.Is(err, errInvalidAddr):
+		http.Error(w, "Invalid addr", http.StatusBadRequest)
+	default:
 		http.Error(w, "Database error", http.StatusInternalServerError)
+	}
+}
+
+func frameToDataValue(frame *ResolvedFrame) *DataValue {
+	return &DataValue{
+		Content:          frame.Content,
+		ContentType:      frame.ContentType,
+		Data:             frame.Data,
+		AccessSecretHash: frame.AccessSecretHash,
+	}
+}
+
+func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, path string) {
+	frame, ok := s.resolvedFrame(w, r, path)
+	if !ok {
 		return
 	}
 
-	if !s.requireAccess(w, r, value) {
+	if !s.requireAccess(w, r, frameToDataValue(frame)) {
 		return
 	}
 
-	w.Header().Set("Content-Type", value.ContentType)
+	setIbGibHeader(w, frame.Addr)
+	w.Header().Set("Content-Type", frame.ContentType)
 
-	if len(value.Data) > 0 {
-		w.Write(value.Data)
+	if len(frame.Data) > 0 {
+		w.Write(frame.Data)
 		return
 	}
-
-	w.Write([]byte(value.Content))
+	w.Write([]byte(frame.Content))
 }
 
 func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, path string) {
@@ -156,24 +174,29 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, path string)
 		ContentType: req.ContentType,
 	}
 
-	if err := applyAccessSecret(&dataValue, req.AccessSecret, nil); err != nil {
+	if err := applyAccessSecret(&dataValue, req.AccessSecret); err != nil {
 		http.Error(w, "Failed to process access_secret", http.StatusInternalServerError)
 		return
 	}
 
-	if !s.requireUsageToken(w, r, path, func() error {
-		return s.storeValue(path, dataValue)
-	}) {
+	result, ok := s.requireUsageToken(w, r, func() (*WriteResult, error) {
+		return s.store.WritePost(path, dataValue)
+	})
+	if !ok {
 		return
 	}
 
+	setIbGibHeader(w, result.Addr)
 	w.Header().Set("Content-Type", "application/json")
-	response := map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "success",
 		"message":   fmt.Sprintf("Data stored at path: %s", path),
+		"route":     result.Route,
+		"ib":        result.Ib,
+		"addr":      result.Addr,
+		"gib":       result.Gib,
 		"protected": len(dataValue.AccessSecretHash) > 0,
-	}
-	json.NewEncoder(w).Encode(response)
+	})
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, path string) {
@@ -189,95 +212,66 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, path string) 
 	}
 
 	dataValue := DataValue{
-		Content:     "",
 		ContentType: contentType,
 		Data:        body,
 	}
 
-	previous, _ := s.getValue(path)
 	secret := accessSecretFromRequest(r)
-	if err := applyAccessSecret(&dataValue, secret, previous); err != nil {
+	if err := applyAccessSecret(&dataValue, secret); err != nil {
 		http.Error(w, "Failed to process access_secret", http.StatusInternalServerError)
 		return
 	}
 
-	if !s.requireUsageToken(w, r, path, func() error {
-		return s.storeValue(path, dataValue)
-	}) {
+	result, ok := s.requireUsageToken(w, r, func() (*WriteResult, error) {
+		return s.store.WritePut(path, dataValue)
+	})
+	if !ok {
 		return
 	}
 
+	setIbGibHeader(w, result.Addr)
 	w.Header().Set("Content-Type", "application/json")
-	response := map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "success",
 		"message":   fmt.Sprintf("Data stored at path: %s", path),
+		"route":     result.Route,
+		"ib":        result.Ib,
+		"addr":      result.Addr,
+		"gib":       result.Gib,
 		"size":      fmt.Sprintf("%d bytes", len(body)),
 		"protected": len(dataValue.AccessSecretHash) > 0,
-	}
-	json.NewEncoder(w).Encode(response)
+	})
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, path string) {
-	value, err := s.getValue(path)
+	frame, err := s.store.ReadLatestAny(path)
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			http.Error(w, fmt.Sprintf("Path '%s' not found", path), http.StatusNotFound)
-			return
-		}
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		s.writeFrameError(w, path, err)
+		return
+	}
+	if frame.Tombstone {
+		http.Error(w, fmt.Sprintf("Path '%s' gone", path), http.StatusGone)
 		return
 	}
 
-	if !s.requireAccess(w, r, value) {
+	if !s.requireAccess(w, r, frameToDataValue(frame)) {
 		return
 	}
 
-	if err := s.deleteValue(path); err != nil {
+	result, err := s.store.WriteTombstone(path)
+	if err != nil {
 		http.Error(w, "Failed to delete data", http.StatusInternalServerError)
 		return
 	}
 
+	setIbGibHeader(w, result.Addr)
 	w.Header().Set("Content-Type", "application/json")
-	response := map[string]string{
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "success",
 		"message": fmt.Sprintf("Data deleted at path: %s", path),
-	}
-	json.NewEncoder(w).Encode(response)
-}
-
-func (s *Server) storeValue(key string, value DataValue) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		data, err := json.Marshal(value)
-		if err != nil {
-			return err
-		}
-		return txn.Set([]byte(key), data)
+		"route":   result.Route,
+		"ib":      result.Ib,
+		"addr":    result.Addr,
+		"gib":     result.Gib,
 	})
-}
-
-func (s *Server) deleteValue(key string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete([]byte(key))
-	})
-}
-
-func (s *Server) getValue(key string) (*DataValue, error) {
-	var value *DataValue
-	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(key))
-		if err != nil {
-			return err
-		}
-
-		return item.Value(func(val []byte) error {
-			var dataValue DataValue
-			if err := json.Unmarshal(val, &dataValue); err != nil {
-				return err
-			}
-			value = &dataValue
-			return nil
-		})
-	})
-
-	return value, err
 }

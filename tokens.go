@@ -25,7 +25,7 @@ var (
 )
 
 // TokenConfig is persisted as flowerpot.json next to the executable.
-// Token keys with an empty value are available; after POST/PUT the value is the upload path.
+// Token keys with an empty value are available; after POST/PUT the value is the created ib^gib addr.
 type TokenConfig struct {
 	UsagePassword string            `json:"usage_password"`
 	Tokens        map[string]string `json:"tokens"`
@@ -136,24 +136,28 @@ func (tc *TokenConfig) generate(count int) ([]string, error) {
 	return created, nil
 }
 
-func (tc *TokenConfig) useForUpload(token, route string, upload func() error) error {
+func (tc *TokenConfig) useForUpload(token string, upload func() (*WriteResult, error)) (*WriteResult, error) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 
-	routeUsed, ok := tc.Tokens[token]
+	addrUsed, ok := tc.Tokens[token]
 	if !ok {
-		return errTokenNotFound
+		return nil, errTokenNotFound
 	}
-	if routeUsed != "" {
-		return errTokenUsed
-	}
-
-	if err := upload(); err != nil {
-		return err
+	if addrUsed != "" {
+		return nil, errTokenUsed
 	}
 
-	tc.Tokens[token] = route
-	return tc.saveLocked()
+	result, err := upload()
+	if err != nil {
+		return nil, err
+	}
+
+	tc.Tokens[token] = result.Addr
+	if err := tc.saveLocked(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func usageTokenFromRequest(r *http.Request) string {
@@ -215,16 +219,17 @@ func (s *Server) handleGenerateTokens(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) requireUsageToken(w http.ResponseWriter, r *http.Request, path string, upload func() error) bool {
+func (s *Server) requireUsageToken(w http.ResponseWriter, r *http.Request, upload func() (*WriteResult, error)) (*WriteResult, bool) {
 	token := usageTokenFromRequest(r)
 	if token == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(fmt.Sprintf(`{"error":"usage token required (header %s)"}`, usageTokenHeader)))
-		return false
+		return nil, false
 	}
 
-	if err := s.tokens.useForUpload(token, path, upload); err != nil {
+	result, err := s.tokens.useForUpload(token, upload)
+	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case errors.Is(err, errTokenNotFound):
@@ -237,8 +242,42 @@ func (s *Server) requireUsageToken(w http.ResponseWriter, r *http.Request, path 
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"upload failed"}`))
 		}
-		return false
+		return nil, false
 	}
 
-	return true
+	return result, true
+}
+
+func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
+	route := r.URL.Query().Get("route")
+	ib := r.URL.Query().Get("ib")
+	if route == "" && ib == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"route or ib query parameter required"}`))
+		return
+	}
+
+	accessSecret := accessSecretFromRequest(r)
+	usagePassword := r.Header.Get(usagePasswordHeader)
+
+	data, err := s.store.ListVersions(route, ib, accessSecret, usagePassword, s.tokens)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case errors.Is(err, errRouteNotFound):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"route not found"}`))
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"failed to list versions"}`))
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "success",
+		"data":   data,
+	})
 }

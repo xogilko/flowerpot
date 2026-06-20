@@ -14,6 +14,7 @@ import (
 
 const (
 	ibPrefix       = "flowerpot"
+	ibRouteSep     = ":"
 	ibGibHeader    = "X-Flowerpot-ib^gib"
 	versionsPath   = "/_flowerpot/versions"
 	keyLatest      = "latest:"
@@ -91,8 +92,7 @@ func routeToIb(route string) string {
 	if route == "" {
 		return ibPrefix
 	}
-	parts := strings.Split(route, "/")
-	return ibPrefix + " " + strings.Join(parts, " ")
+	return ibPrefix + ibRouteSep + route
 }
 
 func ibToRoute(ib string) string {
@@ -100,10 +100,14 @@ func ibToRoute(ib string) string {
 	if ib == ibPrefix {
 		return ""
 	}
-	if !strings.HasPrefix(ib, ibPrefix+" ") {
-		return strings.ReplaceAll(ib, " ", "/")
+	if after, ok := strings.CutPrefix(ib, ibPrefix+ibRouteSep); ok {
+		return after
 	}
-	return strings.ReplaceAll(strings.TrimPrefix(ib, ibPrefix+" "), " ", "/")
+	// Legacy: "flowerpot docs readme" → docs/readme
+	if after, ok := strings.CutPrefix(ib, ibPrefix+" "); ok {
+		return strings.ReplaceAll(after, " ", "/")
+	}
+	return strings.ReplaceAll(ib, " ", "/")
 }
 
 func parseAddr(addr string) (ib, gib string, err error) {

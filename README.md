@@ -4,7 +4,7 @@ A lightweight HTTP file storage and retrieval server built with Go and BadgerDB,
 
 ## Overview
 
-Flowerpot stores uploads as versioned **ibgib frames** in BadgerDB. Each route maps to a stable **ib** identity (`docs/readme` → `flowerpot docs readme`). POST and PUT append new versions; DELETE writes a tombstone frame. GET serves the latest non-tombstone version, or a specific version via `?addr=ib^gib`.
+Flowerpot stores uploads as versioned **ibgib frames** in BadgerDB. Each route maps to a stable **ib** identity (`docs/readme` → `flowerpot:docs/readme`). POST and PUT append new versions; DELETE writes a tombstone frame. GET serves the latest non-tombstone version, or a specific version via `?addr=ib^gib`.
 
 ## Features
 
@@ -27,7 +27,7 @@ Example `flowerpot.json`:
   "usage_password": "abc123...",
   "tokens": {
     "f8a2...": "",
-    "c91b...": "flowerpot uploads photo.png^deadbeef..."
+    "c91b...": "flowerpot:uploads/photo.png^deadbeef..."
   }
 }
 ```
@@ -65,7 +65,7 @@ Successful reads and writes include header **`X-Flowerpot-ib^gib`**.
 
 Secret-gated versions are omitted from listings without a matching secret (no existence leak).
 
-Query: `?route=docs/readme` or `?ib=flowerpot docs readme`
+Query: `?route=docs/readme` or `?ib=flowerpot:docs/readme`
 
 ### Access secrets (per version)
 
@@ -100,8 +100,8 @@ DELETE appends a **tombstone** frame. GET latest on a tombstoned route → **410
 {
   "status": "success",
   "route": "docs/readme",
-  "ib": "flowerpot docs readme",
-  "addr": "flowerpot docs readme^abc123...",
+  "ib": "flowerpot:docs/readme",
+  "addr": "flowerpot:docs/readme^abc123...",
   "gib": "abc123...",
   "protected": false
 }

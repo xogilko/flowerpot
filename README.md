@@ -69,16 +69,15 @@ Query: `?route=docs/readme` or `?ib=flowerpot:docs/readme`
 
 ### Access secrets (per version)
 
-| When storing | How |
-|--------------|-----|
-| **POST** | JSON field `access_secret` |
-| **PUT** | Header `X-Flowerpot-Access-Secret` |
+Each version sets its own read secret explicitly — nothing is inherited from the previous version.
 
-| When reading/deleting | How |
-|-----------------------|-----|
-| **GET**, **DELETE** | Same header or `?access_secret=` |
+| Purpose | How |
+|---------|-----|
+| **Authorize overwrite** (protected route) | `X-Flowerpot-Access-Secret` or `?access_secret=` (POST may also use JSON `access_secret` for the gate) |
+| **Assign read secret to new version** | **POST**: JSON `access_secret` · **PUT**: `X-Flowerpot-Frame-Access-Secret`, or `X-Flowerpot-Access-Secret` when not overwriting a protected route |
+| **Read / delete** | `X-Flowerpot-Access-Secret` or `?access_secret=` |
 
-Each version stores its own bcrypt hash. Wrong or missing secret → **401**.
+Overwriting a protected route without the current secret → **401**. Omitting a frame secret on upload → new version is **public**. Wrong or missing secret on GET/DELETE → **401**.
 
 ### DELETE behavior
 
@@ -90,7 +89,7 @@ DELETE appends a **tombstone** frame. GET latest on a tombstoned route → **410
 {
   "content": "{ \"theme\": \"dark\" }",
   "content_type": "application/json",
-  "access_secret": "optional-read-password"
+  "access_secret": "optional-read-password-for-this-version"
 }
 ```
 

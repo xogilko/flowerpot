@@ -129,12 +129,30 @@ func (s *Server) writeFrameError(w http.ResponseWriter, path string, err error) 
 }
 
 func frameToDataValue(frame *ResolvedFrame) *DataValue {
+	if frame == nil {
+		return nil
+	}
 	return &DataValue{
 		Content:          frame.Content,
 		ContentType:      frame.ContentType,
 		Data:             frame.Data,
 		AccessSecretHash: frame.AccessSecretHash,
 	}
+}
+
+func (s *Server) requireOverwriteAccess(w http.ResponseWriter, gateSecret string, path string) (*ResolvedFrame, bool) {
+	frame, err := s.store.ReadLatest(path)
+	if err != nil {
+		if errors.Is(err, errRouteNotFound) || errors.Is(err, errRouteGone) {
+			return nil, true
+		}
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return nil, false
+	}
+	if !s.requireAccessWithSecret(w, gateSecret, frameToDataValue(frame)) {
+		return nil, false
+	}
+	return frame, true
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, path string) {
@@ -166,6 +184,12 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, path string)
 
 	if req.ContentType == "" {
 		http.Error(w, "content_type is required", http.StatusBadRequest)
+		return
+	}
+
+	gateSecret := gateSecretFromRequest(r, req.AccessSecret)
+	_, ok := s.requireOverwriteAccess(w, gateSecret, path)
+	if !ok {
 		return
 	}
 
@@ -211,13 +235,20 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, path string) 
 		contentType = "application/octet-stream"
 	}
 
+	gateSecret := accessSecretFromRequest(r)
+	previous, ok := s.requireOverwriteAccess(w, gateSecret, path)
+	if !ok {
+		return
+	}
+
+	protectedOverwrite := previous != nil && len(previous.AccessSecretHash) > 0
+
 	dataValue := DataValue{
 		ContentType: contentType,
 		Data:        body,
 	}
 
-	secret := accessSecretFromRequest(r)
-	if err := applyAccessSecret(&dataValue, secret); err != nil {
+	if err := applyAccessSecret(&dataValue, putFrameSecret(r, protectedOverwrite)); err != nil {
 		http.Error(w, "Failed to process access_secret", http.StatusInternalServerError)
 		return
 	}
